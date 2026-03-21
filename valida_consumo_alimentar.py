@@ -2,8 +2,8 @@
 Script de validação e consolidação dos dados SISVAN.
 
 Pastas suportadas:
-  - dados/por_sexo      → consolida em dados/consolidado_por_sexo.xlsx
-  - dados/por_raca_cor  → consolida em dados/consolidado_por_raca_cor.xlsx
+  - dados/consumo_alimentar/por_sexo     → consolida em dados/consumo_alimentar/consolidado_por_sexo.xlsx
+  - dados/consumo_alimentar/por_raca_cor  → consolida em dados/consumo_alimentar/consolidado_por_raca_cor.xlsx
 
 Validações por arquivo:
   - Ano    : igual ao nome do arquivo
@@ -38,8 +38,8 @@ from openpyxl.utils import get_column_letter
 # Configuração geral
 # ---------------------------------------------------------------------------
 
-BASE_DIR = Path(__file__).parent / "dados"
-LOG_FILE = Path(__file__).parent / "logs" / "validate_sisvan.log"
+BASE_DIR = Path(__file__).parent / "dados" / "consumo_alimentar"
+LOG_FILE = Path(__file__).parent / "logs" / "valida_consumo_alimentar.log"
 
 ANOS = list(range(2015, 2025))
 
