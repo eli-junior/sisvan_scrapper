@@ -1,0 +1,60 @@
+PARTE 01 - SELECIONAR POR SEXO
+
+acessar https://sisaps.saude.gov.br/sisvan/relatoriopublico/index
+
+clicar em "CONSUMO ALIMENTAR"
+
+Em "Ano e Mês de Referência / Unidade Geográfica"
+Selecionar o "Ano de Referência" (2015 A 2024)
+Selecionar o "Mês de Referência" (Sempre TODOS)
+Selecionar o "Agrupar por" (Sempre BRASIL)
+
+Em "Consumo Alimentar (a partir de 2015)"
+
+Selecionar "Faixa Etária" (Sempre 2 anos ou mais)
+Selecionar "Fases da Vida" (Sempre Crianças de 5 a 9 anos)
+Selecionar "Tipo de Relatório" (Sempre Consumo de Alimentos Ultraprocessados)
+Selecionar "Sexo" (FEMININO e MASCULINO)
+
+Clicar em Salvar em Excel
+
+PARTE 02 - SELECIONAR POR RACA/COR
+
+acessar https://sisaps.saude.gov.br/sisvan/relatoriopublico/index
+
+clicar em "CONSUMO ALIMENTAR"
+
+Em "Ano e Mês de Referência / Unidade Geográfica"
+Selecionar o "Ano de Referência" (2015 A 2024)
+Selecionar o "Mês de Referência" (Sempre TODOS)
+Selecionar o "Agrupar por" (Sempre BRASIL)
+
+Em "Consumo Alimentar (a partir de 2015)"
+
+Selecionar "Faixa Etária" (Sempre 2 anos ou mais)
+Selecionar "Fases da Vida" (Sempre Crianças de 5 a 9 anos)
+Selecionar "Tipo de Relatório" (Sempre Consumo de Alimentos Ultraprocessados)
+Selecionar "Raça/Cor" (1- Branca, 2- Preta, 3- Amarela, 4- Parda, 5- Indígena)
+
+Clicar em Salvar em Excel
+
+PARTE 03 - SELECIONAR POR REGIÃO
+
+
+acessar https://sisaps.saude.gov.br/sisvan/relatoriopublico/index
+
+clicar em "CONSUMO ALIMENTAR"
+
+Em "Ano e Mês de Referência / Unidade Geográfica"
+Selecionar o "Ano de Referência" (2015 A 2024)
+Selecionar o "Mês de Referência" (Sempre TODOS)
+Selecionar o "Agrupar por" (Sempre REGIÃO)
+Selecionar o "Região" (CENTRO-OESTE, NORDESTE, NORTE, SUDESTE, SUL)
+
+Em "Consumo Alimentar (a partir de 2015)"
+
+Selecionar "Faixa Etária" (Sempre 2 anos ou mais)
+Selecionar "Fases da Vida" (Sempre Crianças de 5 a 9 anos)
+Selecionar "Tipo de Relatório" (Sempre Consumo de Alimentos Ultraprocessados)
+
+Clicar em Salvar em Excel
