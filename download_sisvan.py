@@ -200,7 +200,11 @@ def preencher_e_baixar(driver, ano: int, campos_extra: dict = None, agrupar_por:
 def baixar_com_retry(driver, download_dir: Path, dest_path: Path,
                      ano: int, campos_extra: dict = None, agrupar_por: str = "F",
                      max_tentativas: int = 3):
-    """Preenche o form e faz download com retry."""
+    """Preenche o form e faz download com retry.
+
+    Timeout encerra a execução imediatamente (sem retry).
+    Retry só ocorre em erros inesperados de exceção.
+    """
     for tentativa in range(1, max_tentativas + 1):
         limpar_downloads(download_dir)
         try:
@@ -211,7 +215,8 @@ def baixar_com_retry(driver, download_dir: Path, dest_path: Path,
                 shutil.move(arquivo, str(dest_path))
                 return True
             else:
-                logging.warning(f"Timeout no download (tentativa {tentativa}/{max_tentativas})")
+                logging.error(f"Timeout no download — encerrando sem retry.")
+                return False
         except Exception as e:
             logging.error(f"Erro (tentativa {tentativa}/{max_tentativas}): {e}")
         time.sleep(2)
@@ -341,6 +346,8 @@ def main():
                 n = len(list(pasta.glob("*.xls")))
                 logging.info(f"  {subdir}: {n} arquivos")
 
+    except KeyboardInterrupt:
+        logging.info("\n=== INTERROMPIDO PELO USUARIO ===")
     finally:
         driver.quit()
         if download_dir.exists():
@@ -348,4 +355,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

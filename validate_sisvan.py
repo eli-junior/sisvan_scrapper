@@ -678,21 +678,323 @@ def processar_por_raca():
 
 
 # ---------------------------------------------------------------------------
+# Parser específico para por_regiao (múltiplas linhas no tbody)
+# ---------------------------------------------------------------------------
+
+REGIOES = ["CENTRO-OESTE", "NORDESTE", "NORTE", "SUDESTE", "SUL"]
+
+
+class SisvanParserRegiao(SisvanParser):
+    """Estende o parser base para capturar TODAS as linhas do tbody (uma por região)."""
+
+    def __init__(self):
+        super().__init__()
+        # Substitui tbody_cells por dict {regiao: (total, pct, acomp)}
+        self.regioes_encontradas: dict[str, tuple] = {}
+        self._all_rows: list[list[str]] = []  # todas as linhas brutas do tbody
+
+    def handle_endtag(self, tag):
+        # Captura de tr: registra TODA linha, não apenas a de BRASIL
+        if tag in ("td", "th") and self._in_td_th:
+            self._in_td_th = False
+            text = self._clean("".join(self._current_cell))
+            if self._in_thead:
+                if text:
+                    self.thead_texts.append(text)
+            elif self._in_tbody and self._in_tr:
+                self._current_row_cells.append(text)
+
+        if tag == "tr" and self._in_tbody and self._in_tr:
+            self._in_tr = False
+            row = self._current_row_cells[:]
+            self._all_rows.append(row)
+            row_text = " ".join(row).upper()
+            # Identificar a região desta linha
+            for regiao in REGIOES:
+                if regiao in row_text:
+                    numeric = [c for c in row if c.upper() not in (regiao, "TOTAL BRASIL", "BRASIL")
+                               and not c.upper().startswith("TOTAL")]
+                    # Pegar apenas as células que não são o nome da região
+                    vals = [c for c in row if c not in ("", ) and c.upper() not in row_text.split()[:2]]
+                    # Simples: pegar todas as células que não contêm o nome da região
+                    nums = [c for c in row if c.strip() and c.upper() not in (regiao,)
+                            and not any(r in c.upper() for r in REGIOES + ["BRASIL"])]
+                    if len(nums) >= 3:
+                        self.regioes_encontradas[regiao] = (nums[0], nums[1], nums[2])
+                    elif len(nums) == 2:
+                        self.regioes_encontradas[regiao] = (nums[0], nums[1], None)
+                    break
+
+        if tag == "strong" and self._in_strong:
+            self._in_strong = False
+            text = self._clean("".join(self._current_cell))
+            self._last_strong = text
+
+        if tag == "thead":
+            self._in_thead = False
+        if tag == "tbody":
+            self._in_tbody = False
+
+
+def parse_xls_regiao(filepath: Path) -> SisvanParserRegiao:
+    """Lê o arquivo HTML de região e faz parse."""
+    raw = filepath.read_bytes()
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            content = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        content = raw.decode("utf-8", errors="replace")
+
+    p = SisvanParserRegiao()
+    p.feed(content)
+    return p
+
+
+def validar_por_regiao(filepath: Path, ano: int) -> dict:
+    """
+    Valida arquivo da pasta por_regiao.
+    Retorna dict com chaves: ano, regioes (dict), divergencias, valido.
+    regioes = { 'CENTRO-OESTE': (total, pct, acomp), ... }
+    """
+    divergencias = []
+    p = parse_xls_regiao(filepath)
+
+    # Ano
+    ano_enc = p.meta_ano or p.form_ano
+    if not ano_enc:
+        divergencias.append("ANO: não encontrado")
+    elif str(ano) != str(ano_enc).strip():
+        divergencias.append(f"ANO: esperado {ano}, encontrado '{ano_enc}'")
+
+    # Mês = TODOS
+    mes_enc = p.meta_mes or ("TODOS" if p.form_mes == "99" else p.form_mes)
+    if not mes_enc or EXPECT_MES.upper() not in str(mes_enc).upper():
+        divergencias.append(f"MÊS: esperado 'TODOS', encontrado '{mes_enc}'")
+
+    # Sexo = TODOS
+    if p.meta_sexo and p.meta_sexo.upper() != "TODOS":
+        divergencias.append(f"SEXO: esperado 'TODOS', encontrado '{p.meta_sexo}'")
+
+    # Agrupamento = REGIÃO (tpFiltro=R)
+    if p.form_filtro and p.form_filtro != "R":
+        divergencias.append(f"AGRUPAMENTO: esperado 'R' (REGIÃO), encontrado '{p.form_filtro}'")
+
+    # Tipo
+    if not any(EXPECT_TIPO in t.lower() for t in p.thead_texts):
+        divergencias.append("TIPO: 'Consumo de Alimentos Ultraprocessados' não encontrado")
+
+    # Faixa etária
+    if not any(EXPECT_FAIXA in t.lower() for t in p.thead_texts):
+        divergencias.append("FAIXA ETÁRIA: 'Crianças de 5 a 9 anos' não encontrado")
+
+    # Verificar que todas as 5 regiões foram encontradas
+    regioes_faltando = [r for r in REGIOES if r not in p.regioes_encontradas]
+    if regioes_faltando:
+        divergencias.append(f"REGIÕES FALTANDO: {', '.join(regioes_faltando)}")
+
+    return {
+        "ano": ano,
+        "regioes": p.regioes_encontradas,
+        "divergencias": divergencias,
+        "valido": len(divergencias) == 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Consolidação: por_regiao
+# ---------------------------------------------------------------------------
+
+OUTPUT_REGIAO = BASE_DIR / "consolidado_por_regiao.xlsx"
+
+_FILL_REGIAO = {
+    "CENTRO-OESTE": PatternFill("solid", fgColor="E8F5E9"),
+    "NORDESTE":     PatternFill("solid", fgColor="E3F2FD"),
+    "NORTE":        PatternFill("solid", fgColor="FFF8E1"),
+    "SUDESTE":      PatternFill("solid", fgColor="FCE4EC"),
+    "SUL":          PatternFill("solid", fgColor="F3E5F5"),
+}
+
+
+def _carregar_existentes_regiao(output_file: Path) -> dict:
+    """Lê o consolidado de região e devolve {(ano, regiao): {...}}."""
+    existentes = {}
+    if not output_file.exists():
+        return existentes
+    try:
+        wb = openpyxl.load_workbook(output_file)
+        ws = wb.active
+        for row in ws.iter_rows(min_row=3, values_only=True):
+            if row[0] is None:
+                continue
+            ano, regiao, total, pct, acomp = row[0], row[1], row[2], row[3], row[4]
+            if ano and regiao:
+                existentes[(int(ano), str(regiao).upper())] = {
+                    "total": total, "percentual": pct, "acompanhados": acomp,
+                }
+    except Exception as e:
+        log.warning(f"Não foi possível ler consolidado existente (regiao): {e}")
+    return existentes
+
+
+def _criar_wb_regiao():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "por_regiao"
+
+    hf = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+    hfill = PatternFill("solid", fgColor="E65100")  # laranja escuro
+    border = _thin_border()
+
+    ws.merge_cells("A1:E1")
+    ws["A1"].value = (
+        "SISVAN – Consumo de Alimentos Ultraprocessados | "
+        "Crianças de 5 a 9 anos | por Região"
+    )
+    ws["A1"].font = Font(name="Calibri", bold=True, color="FFFFFF", size=12)
+    ws["A1"].fill = PatternFill("solid", fgColor="BF360C")
+    ws["A1"].alignment = _center()
+    ws.row_dimensions[1].height = 22
+
+    headers = ["Ano", "Região", "Total (Ultraprocessados)", "% (Ultraprocessados)", "Total Acompanhados(as)"]
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=2, column=col, value=h)
+        c.font = hf; c.fill = hfill; c.alignment = _wrap(); c.border = border
+    ws.row_dimensions[2].height = 30
+
+    for col, w in zip("ABCDE", [8, 16, 24, 20, 24]):
+        ws.column_dimensions[col].width = w
+
+    return wb, ws
+
+
+def _escrever_linha_regiao(ws, row: int, ano, regiao, total, pct, acomp, invalido=False, faltando=False):
+    border = _thin_border()
+    if faltando:
+        fill = _FILL_MISSING
+    elif invalido:
+        fill = _FILL_INVALID
+    else:
+        fill = _FILL_REGIAO.get(str(regiao).upper(), PatternFill())
+
+    for col, val in enumerate([ano, regiao, total, pct, acomp], 1):
+        c = ws.cell(row=row, column=col, value=val)
+        c.alignment = _center(); c.border = border; c.fill = fill
+
+
+def processar_por_regiao():
+    log.info("")
+    log.info("=" * 60)
+    log.info("PARTE 3: POR REGIÃO")
+    log.info("=" * 60)
+
+    source_dir = BASE_DIR / "por_regiao"
+    if not source_dir.exists():
+        log.error(f"Pasta não encontrada: {source_dir}")
+        return
+
+    existentes = _carregar_existentes_regiao(OUTPUT_REGIAO)
+    log.info(f"Consolidado existente: {len(existentes)} registros")
+
+    wb, ws = _criar_wb_regiao()
+    # Anos disponíveis na pasta (pode ainda não ter todos os anos)
+    arquivos = sorted(source_dir.glob("regiao_*.xls"))
+    anos_disponiveis = ANOS  # tenta todos, marca faltando se não houver arquivo
+
+    total_arq = len(anos_disponiveis)
+    cont = {"ok": 0, "div": 0, "miss": 0, "skip": 0}
+    divergencias_report = []
+    row_num = 3
+
+    for idx, ano in enumerate(anos_disponiveis, 1):
+        nome = f"regiao_{ano}.xls"
+        fp = source_dir / nome
+
+        if not fp.exists():
+            log.warning(f"  [{idx}/{total_arq}] FALTANDO: {nome}")
+            cont["miss"] += 1
+            # Grava uma linha placeholder por região
+            for regiao in REGIOES:
+                _escrever_linha_regiao(ws, row_num, ano, regiao, "ARQUIVO FALTANDO", None, None, faltando=True)
+                row_num += 1
+            continue
+
+        # Verificar se TODAS as regiões deste ano já estão no consolidado
+        chaves_existentes = [(ano, r) for r in REGIOES if (ano, r) in existentes
+                             and existentes[(ano, r)]["total"] not in (None, "INVÁLIDO", "ARQUIVO FALTANDO")]
+        if len(chaves_existentes) == len(REGIOES):
+            log.info(f"  [{idx}/{total_arq}] JÁ PROCESSADO: {nome}")
+            cont["skip"] += 1
+            for regiao in REGIOES:
+                d = existentes[(ano, regiao)]
+                _escrever_linha_regiao(ws, row_num, ano, regiao, d["total"], d["percentual"], d["acompanhados"])
+                row_num += 1
+            continue
+
+        log.info(f"  [{idx}/{total_arq}] Validando: {nome}")
+        r = validar_por_regiao(fp, ano)
+
+        if r["valido"]:
+            cont["ok"] += 1
+            for regiao in REGIOES:
+                dados = r["regioes"].get(regiao, (None, None, None))
+                log.info(f"    ✓ {regiao}: Total={dados[0]} | %={dados[1]} | Acomp={dados[2]}")
+                _escrever_linha_regiao(ws, row_num, ano, regiao, dados[0], dados[1], dados[2])
+                row_num += 1
+        else:
+            cont["div"] += 1
+            log.warning(f"    ✗ DIVERGÊNCIAS em {nome}:")
+            for d in r["divergencias"]:
+                log.warning(f"      - {d}")
+            divergencias_report.append((nome, r["divergencias"]))
+            # Mesmo com divergências, gravar o que conseguiu extrair (ou INVÁLIDO)
+            for regiao in REGIOES:
+                dados = r["regioes"].get(regiao)
+                if dados:
+                    # Dados extraídos mesmo com divergência de metadados → grava mas marca vermelho
+                    _escrever_linha_regiao(ws, row_num, ano, regiao, dados[0], dados[1], dados[2], invalido=True)
+                else:
+                    _escrever_linha_regiao(ws, row_num, ano, regiao, "INVÁLIDO", None, None, invalido=True)
+                row_num += 1
+
+    OUTPUT_REGIAO.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(OUTPUT_REGIAO)
+
+    log.info(f"\n  Resultado: {cont['ok']} validados | {cont['skip']} reutilizados | "
+             f"{cont['div']} divergências | {cont['miss']} faltando")
+    log.info(f"  Salvo em: {OUTPUT_REGIAO.resolve()}")
+
+    if divergencias_report:
+        log.info("\n  ARQUIVOS COM DIVERGÊNCIAS (regiao):")
+        for nome, divs in divergencias_report:
+            log.warning(f"    {nome}:")
+            for d in divs:
+                log.warning(f"      - {d}")
+
+    return cont
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validação e consolidação SISVAN (por_sexo e/ou por_raca_cor)"
+        description="Validação e consolidação SISVAN (por_sexo, por_raca_cor, por_regiao)"
     )
-    parser.add_argument("--sexo",  action="store_true", help="Processar apenas por_sexo")
-    parser.add_argument("--raca",  action="store_true", help="Processar apenas por_raca_cor")
-    parser.add_argument("--todos", action="store_true", help="Processar ambas (padrão)")
+    parser.add_argument("--sexo",   action="store_true", help="Processar apenas por_sexo")
+    parser.add_argument("--raca",   action="store_true", help="Processar apenas por_raca_cor")
+    parser.add_argument("--regiao", action="store_true", help="Processar apenas por_regiao")
+    parser.add_argument("--todos",  action="store_true", help="Processar tudo (padrão)")
     args = parser.parse_args()
 
     # Por padrão (sem flags), processa tudo
-    rodar_sexo = args.todos or args.sexo or not (args.sexo or args.raca)
-    rodar_raca = args.todos or args.raca or not (args.sexo or args.raca)
+    alguma_flag = args.sexo or args.raca or args.regiao
+    rodar_sexo   = args.todos or args.sexo   or not alguma_flag
+    rodar_raca   = args.todos or args.raca   or not alguma_flag
+    rodar_regiao = args.todos or args.regiao or not alguma_flag
 
     log.info("SISVAN - Validação e Consolidação de Dados")
     log.info(f"Anos: {ANOS[0]}–{ANOS[-1]}")
@@ -701,6 +1003,8 @@ def main():
         processar_por_sexo()
     if rodar_raca:
         processar_por_raca()
+    if rodar_regiao:
+        processar_por_regiao()
 
     log.info("")
     log.info("=== CONCLUÍDO ===")
