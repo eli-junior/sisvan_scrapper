@@ -1,4 +1,5 @@
 dados/
+logs/
 __pycache__/
 *.pyc
 .env

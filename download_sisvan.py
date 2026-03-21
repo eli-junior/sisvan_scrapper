@@ -5,13 +5,12 @@ Script para download automatizado de dados do SISVAN
 - Anos 2015 a 2024
 """
 
-import os
-import sys
 import time
-import glob
 import shutil
+import logging
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -23,8 +22,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 URL = "https://sisaps.saude.gov.br/sisvan/relatoriopublico/index"
 BASE_DIR = Path(__file__).parent / "dados"
-DOWNLOAD_TIMEOUT = 120  # segundos para aguardar download
-DELAY_ENTRE_REQUESTS = 3  # segundos entre cada request
+DOWNLOAD_TIMEOUT = 120
+DELAY_ENTRE_REQUESTS = 3
 
 ANOS = list(range(2015, 2025))
 
@@ -38,23 +37,32 @@ RACAS = {
     "05": "Indigena",
 }
 
-REGIOES = {
-    "5": "CENTRO-OESTE",
-    "2": "NORDESTE",
-    "1": "NORTE",
-    "3": "SUDESTE",
-    "4": "SUL",
-}
+
+def configurar_logging():
+    """Configura logging para console e arquivo."""
+    log_dir = BASE_DIR.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"sisvan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+    )
+    logging.info(f"Log salvo em: {log_file}")
+    return log_file
 
 
-def criar_driver(download_dir: Path, headless: bool = False) -> webdriver.Chrome:
+def criar_driver(download_dir: Path) -> webdriver.Chrome:
     """Cria e configura o ChromeDriver com download automático."""
     download_dir.mkdir(parents=True, exist_ok=True)
     download_path = str(download_dir.resolve())
 
     options = Options()
-    if headless:
-        options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--window-size=1920,1080")
@@ -71,14 +79,6 @@ def criar_driver(download_dir: Path, headless: bool = False) -> webdriver.Chrome
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     driver.implicitly_wait(5)
-
-    # Habilitar download em headless
-    if headless:
-        driver.execute_cdp_cmd(
-            "Page.setDownloadBehavior",
-            {"behavior": "allow", "downloadPath": download_path},
-        )
-
     return driver
 
 
@@ -86,19 +86,16 @@ def aguardar_download(download_dir: Path, timeout: int = DOWNLOAD_TIMEOUT) -> st
     """Aguarda o download de um arquivo completar e retorna o caminho."""
     inicio = time.time()
     while time.time() - inicio < timeout:
-        # Procura arquivos recém-baixados (não .crdownload nem .tmp)
         arquivos = list(download_dir.glob("*"))
         arquivos_validos = [
             f for f in arquivos
             if f.is_file()
-            and not f.suffix == ".crdownload"
-            and not f.suffix == ".tmp"
+            and f.suffix != ".crdownload"
+            and f.suffix != ".tmp"
             and not f.name.startswith(".")
         ]
-        # Verifica se não há downloads em andamento
         downloads_em_andamento = list(download_dir.glob("*.crdownload"))
         if arquivos_validos and not downloads_em_andamento:
-            # Retorna o arquivo mais recente
             mais_recente = max(arquivos_validos, key=lambda f: f.stat().st_mtime)
             return str(mais_recente)
         time.sleep(1)
@@ -112,277 +109,240 @@ def limpar_downloads(download_dir: Path):
             f.unlink()
 
 
-def clicar_aba_consumo(driver):
-    """Clica no botão 'SELECIONAR RELATÓRIO' do card Consumo Alimentar.
+def setar_campos(driver, campos: dict):
+    """Seta valores nos selects nativos do formConsumo via JS.
 
-    O card usa a classe .showSingle com target="3" para exibir div3 (formConsumo).
+    O form usa bootstrap-select + AngularJS, mas o POST envia os valores
+    dos <select> nativos. Setamos direto neles.
+
+    Args:
+        campos: dict de {select_id: valor} ou {name:select_name: valor}
     """
-    wait = WebDriverWait(driver, 15)
-    aba = wait.until(
-        EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, 'a.showSingle[target="3"]')
-        )
-    )
-    aba.click()
-    # Aguarda div3 (formConsumo) ficar visível
-    wait.until(EC.visibility_of_element_located((By.ID, "div3")))
-    time.sleep(1)
+    for campo, valor in campos.items():
+        if campo.startswith("name:"):
+            name = campo[5:]
+            driver.execute_script(f"""
+                var form = document.getElementById('formConsumo');
+                var sel = form.querySelector('select[name="{name}"]');
+                if (sel) sel.value = '{valor}';
+            """)
+        else:
+            driver.execute_script(f"""
+                var sel = document.getElementById('{campo}');
+                if (sel) sel.value = '{valor}';
+            """)
 
 
-def selecionar_campo(driver, select_id: str, valor: str, by_name: bool = False, form_id: str = "formConsumo"):
-    """Seleciona um valor em um campo select via JavaScript.
-
-    Os selects usam bootstrap-select, então não é possível usar Select() do Selenium.
-    Em vez disso, setamos o valor via JS e disparamos o evento 'change'.
+def preencher_e_baixar(driver, ano: int, campos_extra: dict = None, agrupar_por: str = "F"):
     """
-    if by_name:
-        js = f"""
-            var form = document.getElementById('{form_id}');
-            var sel = form.querySelector('[name="{select_id}"]');
-            if (sel) {{
-                sel.value = '{valor}';
-                $(sel).trigger('change');
-                $(sel).selectpicker('refresh');
-            }}
-        """
-    else:
-        js = f"""
-            var sel = document.getElementById('{select_id}');
-            if (sel) {{
-                sel.value = '{valor}';
-                $(sel).trigger('change');
-                $(sel).selectpicker('refresh');
-            }}
-        """
-    driver.execute_script(js)
-    time.sleep(0.5)
+    Navega para a página, preenche o formulário de Consumo Alimentar (2015+)
+    e clica em Salvar em Excel.
 
+    O botão "Salvar em Excel" da seção 2015+ executa um handler jQuery que:
+    1. Lê o ano de #nuAno (select da seção antiga)
+    2. Se ano >= 2015: seta nuAno2015=ano, tpRelatorio=5
+    3. Seta coVisualizacao=2 (Excel)
+    4. Submete o form
 
-def preencher_formulario_base(driver, ano: int, agrupar_por: str = "F", regiao: str = None):
-    """
-    Preenche os campos base do formulário de Consumo Alimentar (2015+).
+    Por isso precisamos setar #nuAno com o ano antes de clicar.
 
     Args:
         driver: WebDriver
         ano: Ano de referência (2015-2024)
+        campos_extra: dict de campos adicionais (ex: {"ds_sexo5": "F"})
         agrupar_por: "F" para BRASIL, "R" para REGIÃO
-        regiao: Código da região (quando agrupar_por="R")
     """
-    # 1. Navegar para a página
+    wait = WebDriverWait(driver, 15)
+
+    # 1. Navegar e abrir seção Consumo Alimentar
     driver.get(URL)
-    time.sleep(2)
-
-    # 2. Clicar na aba CONSUMO ALIMENTAR
-    clicar_aba_consumo(driver)
-
-    # 3. Ano de Referência
-    selecionar_campo(driver, "nuAno2", str(ano))
-
-    # 4. Mês de Referência = TODOS
-    selecionar_campo(driver, "nuMes2", "99")
-
-    # 5. Agrupar por
-    selecionar_campo(driver, "tpFiltro", agrupar_por, by_name=True)
+    wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a.showSingle[target="3"]')))
+    time.sleep(1)
+    driver.find_element(By.CSS_SELECTOR, 'a.showSingle[target="3"]').click()
+    wait.until(EC.visibility_of_element_located((By.ID, "div3")))
     time.sleep(1)
 
-    # 6. Se REGIÃO, selecionar a região
-    if agrupar_por == "R" and regiao:
-        selecionar_campo(driver, "coRegiao", regiao)
-        time.sleep(0.5)
+    # 2. Setar campos base nos selects nativos
+    campos = {
+        # Campos compartilhados (o handler do botão lê #nuAno)
+        "nuAno": str(ano),           # Select pré-2015 (id=nuAno) - OBRIGATÓRIO para o handler
+        "nuAno2": str(ano),          # Select 2015+ (id=nuAno2)
+        "nuMes2": "99",              # Mês = TODOS
+        "name:tpFiltro": agrupar_por, # F=BRASIL, R=REGIÃO
 
-    # 7. Faixa Etária = 2 anos ou mais
-    selecionar_campo(driver, "TP_RELATORIO5", "3")
-    time.sleep(1)
+        # Campos da seção 2015+
+        "TP_RELATORIO5": "3",        # Faixa Etária = 2 anos ou mais
+        "MAIOR_2_ANOS5": "2",        # Fases da Vida = Crianças de 5 a 9 anos
+        "OPCOES_MAIOR_2_ANOS5": "10", # Tipo = Consumo de Alimentos Ultraprocessados
 
-    # 8. Fases da Vida = Crianças de 5 a 9 anos
-    selecionar_campo(driver, "MAIOR_5_ANOS", "1")
-    time.sleep(1)
+        # Defaults seção 2015+
+        "ds_sexo5": "T",             # Sexo = TODOS (default)
+        "ds_raca_cor5": "99",        # Raça/Cor = TODAS (default)
+    }
 
-    # 9. Tipo de Relatório = Consumo de Alimentos Ultraprocessados
-    selecionar_campo(driver, "OPCOES_MAIOR_2_ANOS5", "10")
+    # Aplica campos extras (sexo, raça, região)
+    if campos_extra:
+        campos.update(campos_extra)
+
+    setar_campos(driver, campos)
     time.sleep(0.5)
 
-
-def clicar_salvar_excel(driver):
-    """Seta coVisualizacao=2 e clica no botão Salvar em Excel da seção 2015+."""
-    # Setar hidden field para download Excel
-    driver.execute_script('document.getElementById("coVisualizacao").value = "2";')
-    time.sleep(0.3)
-
-    # O 2º botão "Salvar em Excel" (id=verTela) pertence à seção 2015+
-    # Precisamos encontrar o botão correto dentro do form
-    botoes = driver.find_elements(By.CSS_SELECTOR, "#formConsumo button[type='submit']")
-    if len(botoes) >= 2:
-        botoes[1].click()  # 2º botão = seção 2015+
-    else:
-        botoes[0].click()
+    # 3. Clicar no 2º botão "Salvar em Excel" (seção 2015+) via JS
+    # O handler jQuery vai: ler #nuAno → setar nuAno2015 → setar tpRelatorio=5 → setar coVisualizacao=2 → submit
+    # Usa JS click porque o botão pode estar em seção ng-hide (Angular não atualizou)
+    driver.execute_script("""
+        var btns = document.querySelectorAll('#formConsumo button[type="submit"]');
+        var btn = btns.length >= 2 ? btns[1] : btns[0];
+        btn.click();
+    """)
 
 
-def baixar_com_retry(driver, download_dir: Path, dest_path: Path, max_tentativas: int = 3):
-    """Executa o download com retry."""
+def baixar_com_retry(driver, download_dir: Path, dest_path: Path,
+                     ano: int, campos_extra: dict = None, agrupar_por: str = "F",
+                     max_tentativas: int = 3):
+    """Preenche o form e faz download com retry."""
     for tentativa in range(1, max_tentativas + 1):
         limpar_downloads(download_dir)
         try:
-            clicar_salvar_excel(driver)
+            preencher_e_baixar(driver, ano, campos_extra, agrupar_por)
             arquivo = aguardar_download(download_dir)
             if arquivo:
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(arquivo, str(dest_path))
                 return True
             else:
-                print(f"    Timeout no download (tentativa {tentativa}/{max_tentativas})")
+                logging.warning(f"Timeout no download (tentativa {tentativa}/{max_tentativas})")
         except Exception as e:
-            print(f"    Erro (tentativa {tentativa}/{max_tentativas}): {e}")
+            logging.error(f"Erro (tentativa {tentativa}/{max_tentativas}): {e}")
         time.sleep(2)
     return False
 
 
-def parte01_por_sexo(driver, download_dir: Path, anos: list[int]):
+def parte01_por_sexo(driver, download_dir: Path):
     """Parte 01: Download por sexo (FEMININO e MASCULINO)."""
     dest_dir = BASE_DIR / "por_sexo"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    total = len(anos) * len(SEXOS)
+    total = len(ANOS) * len(SEXOS)
     atual = 0
 
-    print("\n=== PARTE 01: POR SEXO ===")
-    for ano in anos:
+    logging.info("\n=== PARTE 01: POR SEXO ===")
+    for ano in ANOS:
         for cod_sexo, nome_sexo in SEXOS.items():
             atual += 1
             nome_arquivo = f"sexo_{ano}_{nome_sexo}.xls"
             dest_path = dest_dir / nome_arquivo
 
             if dest_path.exists():
-                print(f"  [{atual}/{total}] {nome_arquivo} já existe, pulando.")
+                logging.info(f"  [{atual}/{total}] {nome_arquivo} ja existe, pulando.")
                 continue
 
-            print(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
-            preencher_formulario_base(driver, ano, agrupar_por="F")
-            selecionar_campo(driver, "ds_sexo3", cod_sexo)
-            time.sleep(0.5)
-
-            if baixar_com_retry(driver, download_dir, dest_path):
-                print(f"    OK: {nome_arquivo}")
-            else:
-                print(f"    FALHOU: {nome_arquivo}")
-
+            logging.info(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
+            ok = baixar_com_retry(
+                driver, download_dir, dest_path,
+                ano=ano,
+                campos_extra={"ds_sexo5": cod_sexo},
+            )
+            logging.info(f"    {'OK' if ok else 'FALHOU'}: {nome_arquivo}")
             time.sleep(DELAY_ENTRE_REQUESTS)
 
 
-def parte02_por_raca(driver, download_dir: Path, anos: list[int]):
-    """Parte 02: Download por raça/cor."""
+def parte02_por_raca(driver, download_dir: Path):
+    """Parte 02: Download por raca/cor."""
     dest_dir = BASE_DIR / "por_raca_cor"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    total = len(anos) * len(RACAS)
+    total = len(ANOS) * len(RACAS)
     atual = 0
 
-    print("\n=== PARTE 02: POR RAÇA/COR ===")
-    for ano in anos:
+    logging.info("\n=== PARTE 02: POR RACA/COR ===")
+    for ano in ANOS:
         for cod_raca, nome_raca in RACAS.items():
             atual += 1
             nome_arquivo = f"raca_{ano}_{nome_raca}.xls"
             dest_path = dest_dir / nome_arquivo
 
             if dest_path.exists():
-                print(f"  [{atual}/{total}] {nome_arquivo} já existe, pulando.")
+                logging.info(f"  [{atual}/{total}] {nome_arquivo} ja existe, pulando.")
                 continue
 
-            print(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
-            preencher_formulario_base(driver, ano, agrupar_por="F")
-            selecionar_campo(driver, "ds_raca_cor3", cod_raca)
-            time.sleep(0.5)
-
-            if baixar_com_retry(driver, download_dir, dest_path):
-                print(f"    OK: {nome_arquivo}")
-            else:
-                print(f"    FALHOU: {nome_arquivo}")
-
+            logging.info(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
+            ok = baixar_com_retry(
+                driver, download_dir, dest_path,
+                ano=ano,
+                campos_extra={"ds_raca_cor5": cod_raca},
+            )
+            logging.info(f"    {'OK' if ok else 'FALHOU'}: {nome_arquivo}")
             time.sleep(DELAY_ENTRE_REQUESTS)
 
 
-def parte03_por_regiao(driver, download_dir: Path, anos: list[int]):
-    """Parte 03: Download por região."""
+def parte03_por_regiao(driver, download_dir: Path):
+    """Parte 03: Download por regiao (agrupado por REGIAO, TODOS)."""
     dest_dir = BASE_DIR / "por_regiao"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    total = len(anos) * len(REGIOES)
+    total = len(ANOS)
     atual = 0
 
-    print("\n=== PARTE 03: POR REGIÃO ===")
-    for ano in anos:
-        for cod_regiao, nome_regiao in REGIOES.items():
-            atual += 1
-            nome_arquivo = f"regiao_{ano}_{nome_regiao}.xls"
-            dest_path = dest_dir / nome_arquivo
+    logging.info("\n=== PARTE 03: POR REGIAO ===")
+    for ano in ANOS:
+        atual += 1
+        nome_arquivo = f"regiao_{ano}.xls"
+        dest_path = dest_dir / nome_arquivo
 
-            if dest_path.exists():
-                print(f"  [{atual}/{total}] {nome_arquivo} já existe, pulando.")
-                continue
+        if dest_path.exists():
+            logging.info(f"  [{atual}/{total}] {nome_arquivo} ja existe, pulando.")
+            continue
 
-            print(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
-            preencher_formulario_base(driver, ano, agrupar_por="R", regiao=cod_regiao)
-
-            if baixar_com_retry(driver, download_dir, dest_path):
-                print(f"    OK: {nome_arquivo}")
-            else:
-                print(f"    FALHOU: {nome_arquivo}")
-
-            time.sleep(DELAY_ENTRE_REQUESTS)
+        logging.info(f"  [{atual}/{total}] Baixando {nome_arquivo}...")
+        ok = baixar_com_retry(
+            driver, download_dir, dest_path,
+            ano=ano,
+            campos_extra={"coRegiao": "99"},  # TODOS
+            agrupar_por="R",
+        )
+        logging.info(f"    {'OK' if ok else 'FALHOU'}: {nome_arquivo}")
+        time.sleep(DELAY_ENTRE_REQUESTS)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Download de dados SISVAN")
     parser.add_argument(
-        "--parte",
-        type=int,
-        choices=[1, 2, 3],
-        help="Executar apenas uma parte (1=sexo, 2=raça/cor, 3=região). Sem este argumento, executa todas.",
-    )
-    parser.add_argument(
-        "--ano",
-        type=int,
-        help="Executar apenas para um ano específico (ex: 2024). Sem este argumento, executa 2015-2024.",
-    )
-    parser.add_argument(
-        "--headless",
+        "--replace",
         action="store_true",
-        help="Executar em modo headless (sem abrir janela do navegador).",
+        help="Apaga todos os arquivos baixados e refaz do zero.",
     )
     args = parser.parse_args()
 
-    anos = [args.ano] if args.ano else ANOS
-
-    # Pasta temporária para downloads do Chrome
     download_dir = BASE_DIR / "_temp_downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"SISVAN - Download de Dados de Consumo Alimentar")
-    print(f"Anos: {anos[0]}–{anos[-1]}")
-    print(f"Pasta de saída: {BASE_DIR.resolve()}")
-    print(f"Headless: {'Sim' if args.headless else 'Não'}")
+    if args.replace:
+        logging.info("--replace: Apagando dados anteriores...")
+        for subdir in ["por_sexo", "por_raca_cor", "por_regiao"]:
+            pasta = BASE_DIR / subdir
+            if pasta.exists():
+                shutil.rmtree(pasta)
+            pasta.mkdir(parents=True, exist_ok=True)
 
-    driver = criar_driver(download_dir, headless=args.headless)
+    configurar_logging()
+    logging.info("SISVAN - Download de Dados de Consumo Alimentar")
+    logging.info(f"Anos: {ANOS[0]}-{ANOS[-1]}")
+    logging.info(f"Pasta de saida: {BASE_DIR.resolve()}")
+
+    driver = criar_driver(download_dir)
 
     try:
-        partes = [args.parte] if args.parte else [1, 2, 3]
+        parte01_por_sexo(driver, download_dir)
+        parte02_por_raca(driver, download_dir)
+        parte03_por_regiao(driver, download_dir)
 
-        if 1 in partes:
-            parte01_por_sexo(driver, download_dir, anos)
-        if 2 in partes:
-            parte02_por_raca(driver, download_dir, anos)
-        if 3 in partes:
-            parte03_por_regiao(driver, download_dir, anos)
-
-        print("\n=== CONCLUÍDO ===")
-
-        # Contagem de arquivos baixados
+        logging.info("\n=== CONCLUIDO ===")
         for subdir in ["por_sexo", "por_raca_cor", "por_regiao"]:
             pasta = BASE_DIR / subdir
             if pasta.exists():
                 n = len(list(pasta.glob("*.xls")))
-                print(f"  {subdir}: {n} arquivos")
+                logging.info(f"  {subdir}: {n} arquivos")
 
     finally:
         driver.quit()
-        # Limpar pasta temporária
         if download_dir.exists():
             shutil.rmtree(download_dir, ignore_errors=True)
 
