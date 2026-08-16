@@ -195,3 +195,97 @@ Campos relevantes:
 | `webdriver-manager` | Download automático do ChromeDriver |
 | `openpyxl` | Geração dos consolidados `.xlsx` |
 | `xlrd` | Leitura dos arquivos `.xls` baixados |
+
+---
+
+## Estado Nutricional de adultos por capital
+
+O script `download_estado_nutricional_capitais.py` coleta um relatório para
+cada combinação de ano e capital, seguindo **Ver em tela → Gerar Excel**.
+
+Filtros fixos:
+
+- Anos de 2015 a 2024 e mês TODOS
+- Agrupar por MUNICÍPIO; uma UF por vez; município igual à capital
+- Região de cobertura, sexo, raça/cor, acompanhamentos, povo/comunidade e
+  escolaridade em TODOS/TODAS
+- Fase da vida ADULTO
+
+```bash
+# Coleta completa: 27 capitais × 10 anos = 270 arquivos
+python download_estado_nutricional_capitais.py
+
+# Teste curto ou retomada seletiva
+python download_estado_nutricional_capitais.py --anos 2024 --ufs SP DF
+
+# Refaz somente as UFs selecionadas
+python download_estado_nutricional_capitais.py --anos 2024 --ufs SP --replace
+
+# Execução sem janela do Chrome
+python download_estado_nutricional_capitais.py --headless
+```
+
+Os arquivos são gravados em
+`dados/estado_nutricional_adultos_capitais/UF/`. Arquivos já existentes são
+pulados, portanto uma execução interrompida pode ser retomada com o mesmo
+comando. Se o portal exigir reCAPTCHA, o script registra a ocorrência e não
+tenta contornar o desafio.
+
+### Validação dos relatórios por capital
+
+O `valida_estado_nutricional_capitais.py` não altera os relatórios originais e
+confere, em cada arquivo:
+
+- se o ano e a capital escritos no **nome do arquivo** são os mesmos encontrados
+  no conteúdo do relatório;
+- ano, mês TODOS, fase ADULTO, sexo TODOS e relatório de Estado Nutricional;
+- índice e as seis classificações de IMC;
+- UF, código da UF, código IBGE e nome exato da capital;
+- presença de exatamente uma linha municipal;
+- soma das seis quantidades igual ao total;
+- soma dos percentuais igual a aproximadamente 100% (tolerância de arredondamento).
+
+```bash
+# Audita as 270 combinações e sinaliza também arquivos faltantes
+python valida_estado_nutricional_capitais.py
+
+# Durante o download, valida apenas os arquivos que já existem
+python valida_estado_nutricional_capitais.py --somente-existentes
+
+# Recorte específico
+python valida_estado_nutricional_capitais.py --anos 2015 2016 --ufs SP RJ DF
+```
+
+O resultado detalhado é salvo em
+`dados/estado_nutricional_adultos_capitais/relatorio_validacao.json`. O comando
+retorna código `0` quando tudo que entrou no escopo é válido e código `1` se
+houver arquivo inválido, faltante ou duplicado (`.xls` e `.xlsx` simultâneos).
+Arquivos com nomes extras ou fora do padrão esperado também são sinalizados.
+
+### Consolidação final em XLS
+
+O `consolida_estado_nutricional_capitais.py` cria um único arquivo `.xls`, com
+uma aba por capital no formato `Capital-UF` e dez linhas (2015–2024). Antes de
+incluir os dados, o script valida se o ano e o município do nome do arquivo
+correspondem ao conteúdo.
+
+As colunas consolidadas são:
+
+- Ano;
+- quantidade de Obesidade Grau I, proveniente de `L12`;
+- quantidade de Obesidade Grau II, proveniente de `N12`;
+- quantidade de Obesidade Grau III, proveniente de `P12`;
+- total, proveniente de `R12`.
+
+```bash
+# Consolidação completa
+python consolida_estado_nutricional_capitais.py
+
+# Consolidação parcial
+python consolida_estado_nutricional_capitais.py --anos 2015 2016 --ufs SP RJ DF
+```
+
+O arquivo é salvo em
+`dados/estado_nutricional_adultos_capitais/consolidado_estado_nutricional_capitais.xls`.
+Anos ainda ausentes aparecem como `NÃO COLETADO`; relatórios que não passarem
+pela validação aparecem como `INVÁLIDO` e não são usados como valores.
